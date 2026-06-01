@@ -1,42 +1,110 @@
+import re
 import time
-import requests
+from pathlib import Path
+from datetime import datetime
+
 import pandas as pd
+import requests
 import streamlit as st
+from rdkit import Chem
 from streamlit_ketcher import st_ketcher
 
-st.set_page_config(page_title="Chemical Substructure Locator", layout="wide")
 
-st.title("Chemical Substructure Locator")
+st.set_page_config(page_title="Chemical Inventory Locator", layout="wide")
+
+DATA_DIR = Path(".user_uploads")
+DATA_DIR.mkdir(exist_ok=True)
 
 PUBCHEM_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound"
 
 
+st.title("Chemical Inventory Locator")
+
+
+def safe_user_key(user_text):
+    user_text = user_text.strip().lower()
+    return re.sub(r"[^a-z0-9_-]+", "_", user_text) or "default_user"
+
+
+def user_file_path(user_key):
+    return DATA_DIR / f"{user_key}_latest_inventory.csv"
+
+
+def user_meta_path(user_key):
+    return DATA_DIR / f"{user_key}_metadata.txt"
+
+
+def infer_inventory_date(filename, upload_time=None):
+    match = re.search(r"(20\d{2})[-_](\d{1,2})[-_](\d{1,2})", filename)
+    if match:
+        y, m, d = match.groups()
+        return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
+    return upload_time or "Unknown"
+
+
+def save_user_inventory(user_key, uploaded_file):
+    path = user_file_path(user_key)
+    meta_path = user_meta_path(user_key)
+
+    bytes_data = uploaded_file.getvalue()
+    path.write_bytes(bytes_data)
+
+    upload_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+    inventory_date = infer_inventory_date(uploaded_file.name, upload_time)
+
+    meta_path.write_text(
+        f"original_filename={uploaded_file.name}\n"
+        f"uploaded_at={upload_time}\n"
+        f"inventory_date={inventory_date}\n"
+    )
+
+    return path
+
+
+def load_metadata(user_key):
+    meta_path = user_meta_path(user_key)
+    if not meta_path.exists():
+        return {}
+
+    meta = {}
+    for line in meta_path.read_text().splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            meta[k] = v
+    return meta
+
+
 @st.cache_data(show_spinner=False)
-def pubchem_smiles_lookup(identifier: str):
-    """Look up canonical SMILES from PubChem by chemical name or CAS."""
+def pubchem_smiles_lookup(identifier):
     if not identifier or str(identifier).lower() == "nan":
-        return None
+        return ""
 
     identifier = str(identifier).strip()
-    url = f"{PUBCHEM_BASE}/name/{requests.utils.quote(identifier)}/property/CanonicalSMILES/JSON"
+    url = (
+        f"{PUBCHEM_BASE}/name/"
+        f"{requests.utils.quote(identifier)}"
+        f"/property/CanonicalSMILES/JSON"
+    )
 
     try:
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, timeout=12)
         if r.status_code != 200:
-            return None
+            return ""
 
         data = r.json()
         props = data.get("PropertyTable", {}).get("Properties", [])
         if not props:
-            return None
+            return ""
 
-        return props[0].get("CanonicalSMILES")
+        return props[0].get("CanonicalSMILES", "")
     except Exception:
-        return None
+        return ""
 
 
 def mol_from_smiles(smiles):
     try:
+        if not smiles or str(smiles).lower() == "nan":
+            return None
         return Chem.MolFromSmiles(str(smiles))
     except Exception:
         return None
@@ -44,126 +112,140 @@ def mol_from_smiles(smiles):
 
 def has_substructure(target_smiles, query_mol):
     mol = mol_from_smiles(target_smiles)
-    if mol is None or query_mol is None:
-        return False
-    return mol.HasSubstructMatch(query_mol)
+    return mol is not None and query_mol is not None and mol.HasSubstructMatch(query_mol)
 
+
+user_id = st.text_input(
+    "User name or initials",
+    value="default_user",
+    help="Used to remember the last uploaded inventory for this user.",
+)
+
+user_key = safe_user_key(user_id)
 
 uploaded = st.file_uploader("Upload chemical inventory CSV", type=["csv"])
 
-if uploaded:
-    df = pd.read_csv(uploaded)
-    st.write("Preview:")
-    st.dataframe(df.head())
+if uploaded is not None:
+    save_user_inventory(user_key, uploaded)
+    st.success("Uploaded file saved as this user's latest inventory.")
 
-    st.subheader("Column setup")
+latest_path = user_file_path(user_key)
+meta = load_metadata(user_key)
+
+if latest_path.exists():
+    st.info(
+        f"Loaded latest inventory for `{user_id}`. "
+        f"Inventory date: **{meta.get('inventory_date', 'Unknown')}**. "
+        f"Uploaded at: **{meta.get('uploaded_at', 'Unknown')}**. "
+        f"Original file: **{meta.get('original_filename', 'Unknown')}**."
+    )
+
+    df = pd.read_csv(latest_path)
+
+    st.subheader("Inventory preview")
+    st.dataframe(df.head(), use_container_width=True)
 
     columns = list(df.columns)
 
-    name_col = st.selectbox(
-        "Chemical name column",
-        columns,
-        index=0,
-    )
+    st.subheader("Column setup")
 
-    cas_col = st.selectbox(
-        "CAS column, if available",
-        ["None"] + columns,
-    )
+    name_col = st.selectbox("Chemical name column", columns)
 
-    existing_smiles_col = st.selectbox(
+    cas_col = st.selectbox("CAS column, if available", ["None"] + columns)
+
+    smiles_existing = st.selectbox(
         "Existing SMILES column, if available",
         ["None"] + columns,
     )
 
-    if existing_smiles_col != "None":
-        df["SMILES"] = df[existing_smiles_col]
-    else:
+    if smiles_existing != "None":
+        df["SMILES"] = df[smiles_existing].fillna("").astype(str)
+    elif "SMILES" not in df.columns:
         df["SMILES"] = ""
 
-    st.subheader("Look up missing SMILES")
+    st.subheader("SMILES lookup")
 
-    if st.button("Look up SMILES from PubChem"):
+    if st.button("Look up missing SMILES from PubChem"):
         progress = st.progress(0)
-        results = []
+        smiles_values = []
 
         for i, row in df.iterrows():
-            current = row.get("SMILES", "")
+            current_smiles = str(row.get("SMILES", "")).strip()
 
-            if pd.notna(current) and str(current).strip():
-                results.append(current)
+            if current_smiles:
+                smiles_values.append(current_smiles)
             else:
-                smiles = None
+                found = ""
 
                 if cas_col != "None":
-                    smiles = pubchem_smiles_lookup(row.get(cas_col))
+                    found = pubchem_smiles_lookup(row.get(cas_col, ""))
 
-                if not smiles:
-                    smiles = pubchem_smiles_lookup(row.get(name_col))
+                if not found:
+                    found = pubchem_smiles_lookup(row.get(name_col, ""))
 
-                results.append(smiles or "")
-
-                # Be polite to PubChem
+                smiles_values.append(found)
                 time.sleep(0.15)
 
             progress.progress((i + 1) / len(df))
 
-        df["SMILES"] = results
-        st.success("SMILES lookup complete.")
+        df["SMILES"] = smiles_values
+        df.to_csv(latest_path, index=False)
+        st.success("SMILES lookup complete and saved to this user's latest inventory.")
 
     st.download_button(
-        "Download CSV with SMILES",
+        "Download inventory with SMILES",
         df.to_csv(index=False),
-        file_name="chemical_inventory_with_smiles.csv",
+        file_name="inventory_with_smiles.csv",
         mime="text/csv",
     )
 
-    st.subheader("Draw substructure")
+    st.subheader("Draw or enter substructure")
 
     drawn_smiles = st_ketcher()
+
     smarts_input = st.text_input(
-        "Optional SMARTS query instead of drawn structure",
-        placeholder="Example: C=O, c1ccccc1, [OH]",
+        "Optional SMARTS query",
+        placeholder="Examples: C=O, c1ccccc1, [OH]",
     )
 
     if smarts_input.strip():
         query_mol = Chem.MolFromSmarts(smarts_input.strip())
-        query_label = smarts_input.strip()
+        query_text = smarts_input.strip()
     elif drawn_smiles:
         query_mol = Chem.MolFromSmiles(drawn_smiles)
-        query_label = drawn_smiles
+        query_text = drawn_smiles
     else:
         query_mol = None
-        query_label = None
-
-    if query_label:
-        st.write("Query:", query_label)
+        query_text = ""
 
     location_cols = [
         c for c in df.columns
         if "location" in c.lower()
-        or c.lower() in ["bench", "shelf", "room", "cabinet"]
+        or c.lower() in ["bench", "shelf", "room", "cabinet", "box"]
     ]
 
-    if query_mol is not None and "SMILES" in df.columns:
-        matches = df[df["SMILES"].apply(lambda s: has_substructure(s, query_mol))]
+    if query_text:
+        st.write("Query:", query_text)
 
-        st.subheader("Matches")
-        st.write(f"Found {len(matches)} matching chemicals.")
+        if query_mol is None:
+            st.error("Could not parse the drawn structure or SMARTS query.")
+        else:
+            matches = df[df["SMILES"].apply(lambda s: has_substructure(s, query_mol))]
 
-        display_cols = [name_col, "SMILES"] + location_cols
-        display_cols = list(dict.fromkeys([c for c in display_cols if c in df.columns]))
+            st.subheader("Matching chemicals")
+            st.write(f"Found {len(matches)} matching chemicals.")
 
-        st.dataframe(matches[display_cols], use_container_width=True)
+            display_cols = [name_col, "SMILES"] + location_cols
+            display_cols = list(dict.fromkeys([c for c in display_cols if c in df.columns]))
 
-        st.download_button(
-            "Download matching results",
-            matches.to_csv(index=False),
-            file_name="substructure_matches.csv",
-            mime="text/csv",
-        )
+            st.dataframe(matches[display_cols], use_container_width=True)
 
-    elif query_label:
-        st.error("Could not parse the drawn structure or SMARTS query.")
+            st.download_button(
+                "Download matching results",
+                matches.to_csv(index=False),
+                file_name="substructure_matches.csv",
+                mime="text/csv",
+            )
+
 else:
-    st.info("Upload your chemical inventory CSV to begin.")
+    st.warning("No saved inventory found for this user. Upload a CSV to begin.")
