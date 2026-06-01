@@ -208,7 +208,6 @@ missing_count = (
 )
 
 st.write(f"Missing SMILES: {missing_count}")
-
 if st.button("Look up only missing SMILES from PubChem"):
     progress = st.progress(0)
     updated = 0
@@ -232,11 +231,12 @@ if st.button("Look up only missing SMILES from PubChem"):
             df.at[i, "SMILES"] = found
             updated += 1
 
+            # Save immediately after every successful lookup
+            df = remove_unwanted_columns(df)
+            df.to_csv(path, index=False)
+
         progress.progress((i + 1) / len(df))
         time.sleep(0.12)
-
-    df = remove_unwanted_columns(df)
-    df.to_csv(path, index=False)
 
     st.success(f"SMILES lookup complete. Added {updated} new SMILES.")
 
