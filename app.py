@@ -91,12 +91,21 @@ def mol_from_smiles(smiles):
 
 
 def has_substructure(target_smiles, query_mol):
-    mol = mol_from_smiles(target_smiles)
+    try:
+        smiles = str(target_smiles).strip()
 
-    if mol is None or query_mol is None:
+        if not smiles or smiles.lower() in ["nan", "none"]:
+            return False
+
+        mol = Chem.MolFromSmiles(smiles, sanitize=True)
+
+        if mol is None or query_mol is None:
+            return False
+
+        return mol.HasSubstructMatch(query_mol)
+
+    except Exception:
         return False
-
-    return mol.HasSubstructMatch(query_mol)
 
 
 def query_from_drawn_or_smarts(drawn_smiles, smarts):
@@ -280,8 +289,23 @@ if query_text:
     if query_mol is None:
         st.error("Could not parse the drawn structure or SMARTS query.")
     else:
+
+        valid_mols = df["SMILES"].apply(
+            lambda s: mol_from_smiles(s) is not None
+        ).sum()
+
+        st.write("Valid RDKit molecules:", valid_mols)
+
+        st.write("Example SMILES:")
+        st.dataframe(
+            df[[name_col, "SMILES"]].head(20),
+            use_container_width=True
+        )
+
         matches = df[
-            df["SMILES"].apply(lambda s: has_substructure(s, query_mol))
+            df["SMILES"].apply(
+                lambda s: has_substructure(s, query_mol)
+            )
         ].copy()
 
         st.write(f"Found **{len(matches)}** matching chemicals.")
