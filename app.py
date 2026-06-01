@@ -106,7 +106,7 @@ def query_from_drawn_or_smarts(drawn_smiles, smarts):
         return Chem.MolFromSmarts(smarts), smarts, "SMARTS"
 
     if drawn_smiles:
-        return Chem.MolFromSmiles(drawn_smiles), drawn_smiles, "Drawn SMILES"
+        return Chem.MolFromSmarts(Chem.MolToSmarts(Chem.MolFromSmiles(drawn_smiles))), drawn_smiles, "Drawn structure"
 
     return None, "", ""
 
