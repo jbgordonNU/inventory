@@ -2,8 +2,6 @@ import time
 import requests
 import pandas as pd
 import streamlit as st
-from rdkit.Chem import AllChem
-from rdkit import Chem
 from streamlit_ketcher import st_ketcher
 
 st.set_page_config(page_title="Chemical Substructure Locator", layout="wide")
