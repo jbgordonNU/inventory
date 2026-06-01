@@ -208,16 +208,31 @@ missing_count = (
 )
 
 st.write(f"Missing SMILES: {missing_count}")
-if st.button("Look up only missing SMILES from PubChem"):
-    progress = st.progress(0)
+batch_size = st.number_input(
+    "SMILES lookup batch size",
+    min_value=1,
+    max_value=50,
+    value=25,
+)
+
+if st.button("Look up next batch of missing SMILES"):
+
+    missing_rows = df[
+        df["SMILES"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .eq("")
+    ].index.tolist()
+
+    rows_to_process = missing_rows[:batch_size]
+
     updated = 0
+    progress = st.progress(0)
 
-    for i, row in df.iterrows():
-        current = str(row.get("SMILES", "")).strip()
+    for n, i in enumerate(rows_to_process):
 
-        if current:
-            progress.progress((i + 1) / len(df))
-            continue
+        row = df.loc[i]
 
         found = ""
 
@@ -231,14 +246,24 @@ if st.button("Look up only missing SMILES from PubChem"):
             df.at[i, "SMILES"] = found
             updated += 1
 
-            # Save immediately after every successful lookup
-            df = remove_unwanted_columns(df)
-            df.to_csv(path, index=False)
+        df.to_csv(path, index=False)
 
-        progress.progress((i + 1) / len(df))
-        time.sleep(0.12)
+        progress.progress((n + 1) / len(rows_to_process))
+        time.sleep(0.15)
 
-    st.success(f"SMILES lookup complete. Added {updated} new SMILES.")
+    remaining = (
+        df["SMILES"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .eq("")
+        .sum()
+    )
+
+    st.success(
+        f"Added {updated} SMILES. "
+        f"{remaining} still missing."
+    )
 
 st.download_button(
     "Download inventory with saved SMILES",
