@@ -17,26 +17,24 @@ DATA_DIR.mkdir(exist_ok=True)
 PUBCHEM = "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound"
 
 
-def clean_user_id(user_text: str) -> str:
+def clean_user_id(user_text):
     user_text = str(user_text).strip().lower()
     return re.sub(r"[^a-z0-9_-]+", "_", user_text) or "default"
 
 
-def user_file(user_key: str) -> Path:
+def user_file(user_key):
     return DATA_DIR / f"{user_key}.csv"
 
 
-def meta_file(user_key: str) -> Path:
+def meta_file(user_key):
     return DATA_DIR / f"{user_key}.txt"
 
 
-def remove_unwanted_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Remove columns the user does not want shown/saved."""
-    cols_to_remove = ["Location (space)"]
-    return df.drop(columns=[c for c in cols_to_remove if c in df.columns], errors="ignore")
+def remove_unwanted_columns(df):
+    return df.drop(columns=["Location (space)"], errors="ignore")
 
 
-def infer_inventory_date(filename: str, upload_time: str) -> str:
+def infer_inventory_date(filename, upload_time):
     match = re.search(r"(20\d{2})[-_](\d{1,2})[-_](\d{1,2})", filename)
     if match:
         y, m, d = match.groups()
@@ -45,8 +43,7 @@ def infer_inventory_date(filename: str, upload_time: str) -> str:
 
 
 @st.cache_data(show_spinner=False)
-def lookup_smiles(identifier: str) -> str:
-    """Look up CanonicalSMILES from PubChem by name or CAS."""
+def lookup_smiles(identifier):
     if identifier is None:
         return ""
 
@@ -62,10 +59,12 @@ def lookup_smiles(identifier: str) -> str:
 
     try:
         r = requests.get(url, timeout=12)
+
         if r.status_code != 200:
             return ""
 
         props = r.json().get("PropertyTable", {}).get("Properties", [])
+
         if not props:
             return ""
 
@@ -75,19 +74,32 @@ def lookup_smiles(identifier: str) -> str:
         return ""
 
 
-def mol_from_smiles(smiles: str):
+def mol_from_smiles(smiles):
     try:
         if smiles is None:
             return None
+
         smiles = str(smiles).strip()
+
         if not smiles or smiles.lower() == "nan":
             return None
+
         return Chem.MolFromSmiles(smiles)
+
     except Exception:
         return None
 
 
-def query_from_drawn_or_smarts(drawn_smiles: str, smarts: str):
+def has_substructure(target_smiles, query_mol):
+    mol = mol_from_smiles(target_smiles)
+
+    if mol is None or query_mol is None:
+        return False
+
+    return mol.HasSubstructMatch(query_mol)
+
+
+def query_from_drawn_or_smarts(drawn_smiles, smarts):
     smarts = str(smarts or "").strip()
 
     if smarts:
@@ -97,13 +109,6 @@ def query_from_drawn_or_smarts(drawn_smiles: str, smarts: str):
         return Chem.MolFromSmiles(drawn_smiles), drawn_smiles, "Drawn SMILES"
 
     return None, "", ""
-
-
-def has_substructure(target_smiles: str, query_mol) -> bool:
-    mol = mol_from_smiles(target_smiles)
-    if mol is None or query_mol is None:
-        return False
-    return mol.HasSubstructMatch(query_mol)
 
 
 st.title("Chemical Inventory Locator")
@@ -126,6 +131,7 @@ if uploaded is not None:
     inventory_date = infer_inventory_date(uploaded.name, upload_time)
 
     df_uploaded.to_csv(user_file(user_key), index=False)
+
     meta_file(user_key).write_text(
         f"original_filename={uploaded.name}\n"
         f"uploaded_at={upload_time}\n"
@@ -142,11 +148,10 @@ if not path.exists():
 
 df = pd.read_csv(path)
 df = remove_unwanted_columns(df)
-
-# Ensure cleaned version stays saved.
 df.to_csv(path, index=False)
 
 metadata = {}
+
 if meta_file(user_key).exists():
     for line in meta_file(user_key).read_text().splitlines():
         if "=" in line:
@@ -160,7 +165,7 @@ st.info(
 )
 
 st.subheader("Inventory preview")
-st.dataframe(df.head(25), width="stretch")
+st.dataframe(df.head(25), use_container_width=True)
 
 columns = list(df.columns)
 
@@ -184,7 +189,15 @@ if smiles_col != "SMILES":
 
 st.subheader("SMILES lookup")
 
-missing_count = (df["SMILES"].fillna("").astype(str).str.strip() == "").sum()
+missing_count = (
+    df["SMILES"]
+    .fillna("")
+    .astype(str)
+    .str.strip()
+    .eq("")
+    .sum()
+)
+
 st.write(f"Missing SMILES: {missing_count}")
 
 if st.button("Look up only missing SMILES from PubChem"):
@@ -234,13 +247,24 @@ smarts_input = st.text_input(
     placeholder="Examples: C=O, c1ccccc1, [OH], [N+](=O)[O-]",
 )
 
-query_mol, query_text, query_type = query_from_drawn_or_smarts(drawn_smiles, smarts_input)
+query_mol, query_text, query_type = query_from_drawn_or_smarts(
+    drawn_smiles,
+    smarts_input,
+)
 
 location_cols = [
     c for c in df.columns
     if (
         "location" in c.lower()
-        or c.lower() in ["bench", "shelf", "room", "cabinet", "box", "specific location note"]
+        or c.lower()
+        in [
+            "bench",
+            "shelf",
+            "room",
+            "cabinet",
+            "box",
+            "specific location note",
+        ]
     )
     and c != "Location (space)"
 ]
@@ -251,14 +275,20 @@ if query_text:
     if query_mol is None:
         st.error("Could not parse the drawn structure or SMARTS query.")
     else:
-        matches = df[df["SMILES"].apply(lambda s: has_substructure(s, query_mol))].copy()
+        matches = df[
+            df["SMILES"].apply(lambda s: has_substructure(s, query_mol))
+        ].copy()
 
         st.write(f"Found **{len(matches)}** matching chemicals.")
 
         display_cols = [name_col, "SMILES"] + location_cols
-        display_cols = list(dict.fromkeys([c for c in display_cols if c in matches.columns]))
+        display_cols = list(
+            dict.fromkeys(
+                [c for c in display_cols if c in matches.columns]
+            )
+        )
 
-        st.dataframe(matches[display_cols], width="stretch")
+        st.dataframe(matches[display_cols], use_container_width=True)
 
         st.download_button(
             "Download matching results",
@@ -273,9 +303,15 @@ text_query = st.text_input("Search all inventory fields")
 
 if text_query:
     mask = pd.Series(False, index=df.index)
+
     for col in df.columns:
-        mask |= df[col].astype(str).str.contains(text_query, case=False, na=False)
+        mask |= df[col].astype(str).str.contains(
+            text_query,
+            case=False,
+            na=False,
+        )
 
     text_matches = df[mask]
+
     st.write(f"Found **{len(text_matches)}** text matches.")
-    st.dataframe(text_matches, width="stretch")
+    st.dataframe(text_matches, use_container_width=True)
