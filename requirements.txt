@@ -2,4 +2,4 @@ streamlit
 pandas
 requests
 streamlit-ketcher
-rdkit-pypi
+numpy
