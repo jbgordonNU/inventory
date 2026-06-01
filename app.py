@@ -252,6 +252,11 @@ query_mol, query_text, query_type = query_from_drawn_or_smarts(
     smarts_input,
 )
 
+st.write("Drawn SMILES:", drawn_smiles)
+st.write("Query text:", query_text)
+st.write("Valid query:", query_mol is not None)
+st.write("Rows with SMILES:", df["SMILES"].astype(str).str.strip().ne("").sum())
+
 location_cols = [
     c for c in df.columns
     if (
