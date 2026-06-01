@@ -1,71 +1,170 @@
+import time
+import requests
 import pandas as pd
 import streamlit as st
+from rdkit import Chem
+from streamlit_ketcher import st_ketcher
 
-st.set_page_config(page_title="Chemical Locator", layout="wide")
-st.title("Chemical Locator")
-st.write("Upload a chemical inventory CSV, then search by chemical name, CAS, functional group keyword, or location fields.")
+st.set_page_config(page_title="Chemical Substructure Locator", layout="wide")
 
-uploaded = st.file_uploader("Upload inventory CSV", type=["csv"])
+st.title("Chemical Substructure Locator")
 
-FUNCTIONAL_GROUPS = {
-    "Aromatic / benzene": ["benzene", "phenyl", "toluene", "xylene", "anisole", "pyridine"],
-    "Alcohol": ["ol", "alcohol", "methanol", "ethanol", "propanol", "butanol"],
-    "Amine": ["amine", "aniline", "amino"],
-    "Carboxylic acid": ["acid", "carboxylic"],
-    "Ester": ["ester", "acetate", "benzoate"],
-    "Ether": ["ether", "methoxy", "ethoxy"],
-    "Halide": ["fluoro", "chloro", "bromo", "iodo", "chloride", "bromide", "iodide"],
-    "Ketone / aldehyde": ["one", "aldehyde", "benzaldehyde"],
-    "Nitrile": ["nitrile", "cyano"],
-    "Nitro": ["nitro"],
-}
+PUBCHEM_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound"
 
-if uploaded is None:
-    st.info("Upload your Chemical Container export CSV to begin.")
-    st.stop()
 
-df = pd.read_csv(uploaded)
-st.subheader("Inventory preview")
-st.dataframe(df.head(50), use_container_width=True)
+@st.cache_data(show_spinner=False)
+def pubchem_smiles_lookup(identifier: str):
+    """Look up canonical SMILES from PubChem by chemical name or CAS."""
+    if not identifier or str(identifier).lower() == "nan":
+        return None
 
-cols = df.columns.tolist()
-name_col = st.selectbox("Chemical name column", cols, index=cols.index("Chemical Name") if "Chemical Name" in cols else 0)
-cas_col = st.selectbox("CAS column", ["(none)"] + cols, index=(["(none)"] + cols).index("CAS Number") if "CAS Number" in cols else 0)
+    identifier = str(identifier).strip()
+    url = f"{PUBCHEM_BASE}/name/{requests.utils.quote(identifier)}/property/CanonicalSMILES/JSON"
 
-mode = st.radio("Search mode", ["Functional group / keyword", "Chemical name or CAS", "Location contains"], horizontal=True)
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return None
 
-result = df.copy()
+        data = r.json()
+        props = data.get("PropertyTable", {}).get("Properties", [])
+        if not props:
+            return None
 
-if mode == "Functional group / keyword":
-    group = st.selectbox("Pick a group", list(FUNCTIONAL_GROUPS.keys()))
-    extra = st.text_input("Optional extra keyword")
-    terms = FUNCTIONAL_GROUPS[group] + ([extra] if extra else [])
-    pattern = "|".join([t for t in terms if t])
-    mask = result[name_col].fillna("").str.contains(pattern, case=False, regex=True)
-    result = result[mask]
-    st.caption("This MVP uses name-based matching. For true substructure search, add SMILES/InChI and use RDKit.")
+        return props[0].get("CanonicalSMILES")
+    except Exception:
+        return None
 
-elif mode == "Chemical name or CAS":
-    q = st.text_input("Search text")
-    if q:
-        mask = result[name_col].fillna("").str.contains(q, case=False, regex=False)
-        if cas_col != "(none)":
-            mask = mask | result[cas_col].fillna("").astype(str).str.contains(q, case=False, regex=False)
-        result = result[mask]
 
+def mol_from_smiles(smiles):
+    try:
+        return Chem.MolFromSmiles(str(smiles))
+    except Exception:
+        return None
+
+
+def has_substructure(target_smiles, query_mol):
+    mol = mol_from_smiles(target_smiles)
+    if mol is None or query_mol is None:
+        return False
+    return mol.HasSubstructMatch(query_mol)
+
+
+uploaded = st.file_uploader("Upload chemical inventory CSV", type=["csv"])
+
+if uploaded:
+    df = pd.read_csv(uploaded)
+    st.write("Preview:")
+    st.dataframe(df.head())
+
+    st.subheader("Column setup")
+
+    columns = list(df.columns)
+
+    name_col = st.selectbox(
+        "Chemical name column",
+        columns,
+        index=0,
+    )
+
+    cas_col = st.selectbox(
+        "CAS column, if available",
+        ["None"] + columns,
+    )
+
+    existing_smiles_col = st.selectbox(
+        "Existing SMILES column, if available",
+        ["None"] + columns,
+    )
+
+    if existing_smiles_col != "None":
+        df["SMILES"] = df[existing_smiles_col]
+    else:
+        df["SMILES"] = ""
+
+    st.subheader("Look up missing SMILES")
+
+    if st.button("Look up SMILES from PubChem"):
+        progress = st.progress(0)
+        results = []
+
+        for i, row in df.iterrows():
+            current = row.get("SMILES", "")
+
+            if pd.notna(current) and str(current).strip():
+                results.append(current)
+            else:
+                smiles = None
+
+                if cas_col != "None":
+                    smiles = pubchem_smiles_lookup(row.get(cas_col))
+
+                if not smiles:
+                    smiles = pubchem_smiles_lookup(row.get(name_col))
+
+                results.append(smiles or "")
+
+                # Be polite to PubChem
+                time.sleep(0.15)
+
+            progress.progress((i + 1) / len(df))
+
+        df["SMILES"] = results
+        st.success("SMILES lookup complete.")
+
+    st.download_button(
+        "Download CSV with SMILES",
+        df.to_csv(index=False),
+        file_name="chemical_inventory_with_smiles.csv",
+        mime="text/csv",
+    )
+
+    st.subheader("Draw substructure")
+
+    drawn_smiles = st_ketcher()
+    smarts_input = st.text_input(
+        "Optional SMARTS query instead of drawn structure",
+        placeholder="Example: C=O, c1ccccc1, [OH]",
+    )
+
+    if smarts_input.strip():
+        query_mol = Chem.MolFromSmarts(smarts_input.strip())
+        query_label = smarts_input.strip()
+    elif drawn_smiles:
+        query_mol = Chem.MolFromSmiles(drawn_smiles)
+        query_label = drawn_smiles
+    else:
+        query_mol = None
+        query_label = None
+
+    if query_label:
+        st.write("Query:", query_label)
+
+    location_cols = [
+        c for c in df.columns
+        if "location" in c.lower()
+        or c.lower() in ["bench", "shelf", "room", "cabinet"]
+    ]
+
+    if query_mol is not None and "SMILES" in df.columns:
+        matches = df[df["SMILES"].apply(lambda s: has_substructure(s, query_mol))]
+
+        st.subheader("Matches")
+        st.write(f"Found {len(matches)} matching chemicals.")
+
+        display_cols = [name_col, "SMILES"] + location_cols
+        display_cols = list(dict.fromkeys([c for c in display_cols if c in df.columns]))
+
+        st.dataframe(matches[display_cols], use_container_width=True)
+
+        st.download_button(
+            "Download matching results",
+            matches.to_csv(index=False),
+            file_name="substructure_matches.csv",
+            mime="text/csv",
+        )
+
+    elif query_label:
+        st.error("Could not parse the drawn structure or SMARTS query.")
 else:
-    location_cols = [c for c in ["Location (space)", "Bench", "Shelf", "Specific Location Note"] if c in cols]
-    chosen = st.multiselect("Location columns", location_cols or cols, default=location_cols)
-    q = st.text_input("Location text")
-    if q and chosen:
-        mask = pd.Series(False, index=result.index)
-        for c in chosen:
-            mask = mask | result[c].fillna("").astype(str).str.contains(q, case=False, regex=False)
-        result = result[mask]
-
-st.subheader(f"Matches: {len(result)}")
-show_cols = [c for c in ["Chemical Name", "CAS Number", "Location (space)", "Bench", "Shelf", "Specific Location Note", "Amount", "Units", "Container ID", "Chemical Owner", "Storage Group Category"] if c in result.columns]
-st.dataframe(result[show_cols] if show_cols else result, use_container_width=True)
-
-csv = result.to_csv(index=False).encode("utf-8")
-st.download_button("Download matches as CSV", csv, "chemical_location_matches.csv", "text/csv")
+    st.info("Upload your chemical inventory CSV to begin.")
